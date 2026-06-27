@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#
+# english — a programming language whose compiler is Claude.
+#
+# You write programs in English: just a folder of markdown files (or a single
+# one). The "compile" step is one line: hand the markdown to Claude's built-in
+# `/goal`, with a prompt telling it to read the prose, follow the markdown links
+# between the files, and emit real source code in whatever target language the
+# program asks for — then edit the markdown in place, linking each line of prose
+# to the code that realizes it. The source files become the semantic graph.
+#
+# Usage:
+#   english build [path]     Compile a markdown file or a folder of them (default: .)
+#   english install          Symlink this script onto your PATH (~/.local/bin)
+#   english help             Show this help
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die() { echo "english: $*" >&2; exit 1; }
+
+# The compiler, in prose. $1 is the absolute path to the program (file or folder).
+goal_prompt() {
+  cat <<EOF
+Compile the english program at $1 into real source code. It is plain markdown:
+a single .md file or a folder of them. Treat this as a deterministic build, not
+a conversation — do not ask questions; make the most reasonable choice and record
+it. Be faithful to the prose; do not invent requirements it doesn't state or imply.
+
+1. READ THE WHOLE CORPUS. If the path is a folder, read every markdown file under
+   it (ignore the output/build dir — that's prior generated code). Follow the
+   markdown links between files transitively until you've read everything
+   reachable. A linked file is authoritative: when it constrains behavior, the
+   generated code MUST obey it. A file may carry optional YAML frontmatter with
+   build hints: 'target' (language/framework) and 'out' (output dir, relative to
+   the file). If target is absent, infer the best-fit language from the prose;
+   if out is absent, default to a 'build/' dir at the root of the input.
+
+2. GENERATE THE CODE. Write real, idiomatic, runnable source for the target into
+   the out directory — including whatever a normal project of that kind needs
+   (entry point, build/manifest file) so it actually runs. At the top of every
+   generated file, add a header comment (in that language's comment syntax) with
+   markdown links back to the source markdown and the specific files that ground
+   it, e.g. in Elixir:
+     # Compiled from english: [todo.md](../todo.md)
+     # Grounded by: [storage rules](../storage.md)
+   This back-link makes the graph bidirectional.
+
+3. WEAVE THE GRAPH BACK INTO THE MARKDOWN. Edit the original markdown files IN
+   PLACE — do not create new files. For each one, keep the prose exactly as it
+   is (same headings, same wording) and add markdown links: wherever a sentence
+   or section is realized by generated code, link the relevant phrase to that
+   file, e.g. '... appends a [new task](build/lib/todo/store.ex) ...'. Leave the
+   existing links between markdown files alone. This makes the source markdown
+   itself the semantic graph, navigable straight to the code that satisfies each
+   line. Be idempotent: if a phrase is already linked to its code from a previous
+   build, update the target rather than adding a second link.
+
+4. REPORT. Print a concise summary: target, files generated (with paths), and
+   the markdown files you annotated with links.
+EOF
+}
+
+cmd_build() {
+  local target="${1:-.}"; shift || true
+  [ -e "$target" ] || die "no such file or directory: $target"
+  local abs
+  if [ -d "$target" ]; then
+    abs="$(cd "$target" && pwd)"
+  else
+    abs="$(cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+  fi
+  echo "english: compiling $target"
+  # The entire compiler:
+  claude -p "/goal $(goal_prompt "$abs")" \
+    --permission-mode acceptEdits \
+    --allowedTools "Read Write Edit Glob Grep Bash" \
+    "$@" 2>/dev/null || die "compilation failed for $target"
+  echo "english: done"
+}
+
+cmd_install() {
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$SCRIPT_DIR/english" "$HOME/.local/bin/english"
+  echo "english: linked -> $HOME/.local/bin/english"
+}
+
+main() {
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    build)   cmd_build "$@" ;;
+    install) cmd_install ;;
+    help|-h|--help)
+      sed -n '3,15p' "$SCRIPT_DIR/english" | sed 's/^# \{0,1\}//'
+      ;;
+    *) die "unknown command: $sub (try: english help)" ;;
+  esac
+}
+
+main "$@"
